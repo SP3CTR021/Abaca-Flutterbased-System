@@ -1,0 +1,139 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function employeeDoc() {
+      return get(/databases/$(database)/documents/employees/$(request.auth.uid));
+    }
+
+    function isActiveEmployee() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/employees/$(request.auth.uid))
+        && employeeDoc().data.is_active == true;
+    }
+
+    function hasRole(allowedRoles) {
+      return isActiveEmployee() && (employeeDoc().data.role in allowedRoles);
+    }
+
+    // ------------------------------------------------------------------------
+    // employees (UID == employee_id)
+    // ------------------------------------------------------------------------
+    match /employees/{employeeId} {
+      allow read: if isActiveEmployee() || (isSignedIn() && request.auth.uid == employeeId);
+      allow create: if hasRole(['manager']) || (isSignedIn() && request.auth.uid == employeeId);
+      allow update, delete: if hasRole(['manager']);
+    }
+
+    // ------------------------------------------------------------------------
+    // suppliers & customers
+    // ------------------------------------------------------------------------
+    match /suppliers/{supplierId} {
+      allow read: if isActiveEmployee();
+      allow write: if hasRole(['manager', 'warehouse_staff']);
+    }
+
+    match /customers/{customerId} {
+      allow read: if isActiveEmployee();
+      allow write: if hasRole(['manager', 'warehouse_staff', 'accountant']);
+    }
+
+    // ------------------------------------------------------------------------
+    // inventory & uniqueness lock docs (inventory_type_locks/{normalizedKey})
+    // ------------------------------------------------------------------------
+    match /inventory/{inventoryId} {
+      allow read: if isActiveEmployee();
+      allow create, delete: if hasRole(['manager', 'warehouse_staff']);
+      // Delivery drivers adjust stock exclusively inside completeDelivery transactions.
+      allow update: if hasRole(['manager', 'warehouse_staff', 'delivery_driver'])
+        && request.resource.data.current_stock_kg >= 0;
+    }
+
+    match /inventory_type_locks/{lockKey} {
+      allow read: if isActiveEmployee();
+      allow write: if hasRole(['manager', 'warehouse_staff']);
+    }
+
+    // ------------------------------------------------------------------------
+    // stock_ins + items subcollection
+    // ------------------------------------------------------------------------
+    match /stock_ins/{stockInId} {
+      allow read: if isActiveEmployee();
+      allow write: if hasRole(['manager', 'warehouse_staff']);
+
+      match /items/{itemId} {
+        allow read: if isActiveEmployee();
+        allow write: if hasRole(['manager', 'warehouse_staff']);
+      }
+    }
+
+    // Allow collectionGroup('items') reads for active staff.
+    match /{path=**}/items/{itemId} {
+      allow read: if isActiveEmployee();
+    }
+
+    // ------------------------------------------------------------------------
+    // stock_outs
+    // ------------------------------------------------------------------------
+    match /stock_outs/{stockOutId} {
+      allow read: if isActiveEmployee();
+      // Drivers create delivery-linked stock_outs inside completeDelivery transactions.
+      allow create: if hasRole(['manager', 'warehouse_staff', 'delivery_driver'])
+        && request.resource.data.quantity_kg > 0;
+      allow update, delete: if hasRole(['manager', 'warehouse_staff']);
+    }
+
+    // ------------------------------------------------------------------------
+    // orders + payments subcollection
+    // ------------------------------------------------------------------------
+    match /orders/{orderId} {
+      allow read: if isActiveEmployee();
+      allow create, delete: if hasRole(['manager', 'warehouse_staff', 'accountant']);
+      allow update: if hasRole(['manager', 'warehouse_staff', 'accountant', 'delivery_driver']);
+
+      match /payments/{paymentId} {
+        allow read: if isActiveEmployee();
+        allow create, delete: if hasRole(['manager', 'accountant']);
+        allow update: if false;
+      }
+    }
+
+    // Allow collectionGroup('payments') queries across orders.
+    match /{path=**}/payments/{paymentId} {
+      allow read: if isActiveEmployee();
+    }
+
+    // ------------------------------------------------------------------------
+    // deliveries & 1:1 order_delivery_locks/{orderId}
+    // ------------------------------------------------------------------------
+    match /deliveries/{deliveryId} {
+      allow read: if isActiveEmployee();
+      allow write: if hasRole(['manager', 'warehouse_staff', 'delivery_driver']);
+    }
+
+    match /order_delivery_locks/{orderId} {
+      allow read: if isActiveEmployee();
+      allow write: if hasRole(['manager', 'warehouse_staff', 'accountant']);
+    }
+
+    // ------------------------------------------------------------------------
+    // expenses
+    // ------------------------------------------------------------------------
+    match /expenses/{expenseId} {
+      allow read: if isActiveEmployee();
+      allow write: if hasRole(['manager', 'accountant']);
+    }
+
+    // ------------------------------------------------------------------------
+    // activity_logs (strictly append-only)
+    // ------------------------------------------------------------------------
+    match /activity_logs/{logId} {
+      allow read: if isActiveEmployee();
+      allow create: if isActiveEmployee();
+      allow update, delete: if false;
+    }
+  }
+}
